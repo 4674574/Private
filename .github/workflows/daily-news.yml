@@ -7,8 +7,8 @@ name: 每日新闻推送
 
 on:
   schedule:
-    # GitHub 用的是 UTC 时间，北京时间 08:00 = UTC 00:00
-    - cron: '0 0 * * *'
+    # GitHub 用的是 UTC 时间，北京时间 07:00 = UTC 23:30
+    - cron: '30 23 * * *'
   # 允许手动点击运行
   workflow_dispatch:
 
