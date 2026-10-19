@@ -41,6 +41,12 @@ jobs:
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           USE_SSL: ${{ secrets.USE_SSL }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+
+
+
         run: python run_ci.py
 
       - name: 保存新闻存档
