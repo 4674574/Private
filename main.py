@@ -160,20 +160,51 @@ def collect_news(config: dict) -> dict:
         logger.warning("未抓取到任何新闻，请检查网络连接")
         return sections
 
-    # 抓取要展示的那几条的正文原文（邮件里放原文）
-    # 只抓配额内的条目，避免无谓请求
-    quota_map = {"baidu": 6, "thepaper": 5, "chinanews": 5, "thepaper_world": 4}
+    # 抓取正文原文。搜索页类链接（如百度热搜）直接抓不到，
+    # news_body 会按标题反查一篇报道再抓。
+    detail_cfg = config.get("detail", {}) or {}
+    want_quota = detail_cfg.get("quota") or {"baidu": 6, "thepaper": 5,
+                                             "chinanews": 5, "thepaper_world": 4}
+    # 多取几条备选，用来补足「抓不到原文」的空缺
+    spare = int(detail_cfg.get("spare", 6))
+    retry_search = bool(detail_cfg.get("retry_search", True))
 
-    logger.info("正在抓取新闻原文...")
     ok_total = 0
     pick_total = 0
     for key, items in sections.items():
-        quota = quota_map.get(key, per_section)
-        target = items[:quota]
-        got = fetch_bodies(target, key)
-        pick_total += len(target)
+        quota = int(want_quota.get(key, per_section))
+        pool = items[:quota + spare]
+        got = fetch_bodies(pool, key, retry_search=retry_search)
+        pick_total += len(pool)
         ok_total += got
     logger.info("  原文抓取完成：%d/%d 条成功", ok_total, pick_total)
+
+    # 只留下「有正文」的条目：没内容的新闻不往邮件里放
+    keep_empty = bool(detail_cfg.get("keep_without_body", False))
+    if not keep_empty:
+        for key in list(sections.keys()):
+            sections[key] = [it for it in sections[key] if it.get("body")]
+    for key in list(sections.keys()):
+        quota = int(want_quota.get(key, per_section))
+        sections[key] = sections[key][:quota]
+    kept = sum(len(v) for v in sections.values())
+    logger.info("  最终保留 %d 条（无正文的已剔除）", kept)
+
+    # AI 生成「一句话 + 完整说明」
+    from ai_brief import AIConfig, enrich_items  # noqa: E402
+
+    ai_cfg = AIConfig()
+    if ai_cfg.enabled:
+        logger.info("正在用 AI 生成说明（%s / %s）...", ai_cfg.provider, ai_cfg.model)
+        n = 0
+        for key, items in sections.items():
+            stat = enrich_items(items, key, ai_cfg)
+            n += len(items)
+            logger.info("  %s: 成功 %d / 跳过 %d / 失败 %d",
+                        key, stat["ok"], stat["skip"], stat["fail"])
+        logger.info("  AI 说明生成完毕，共处理 %d 条", n)
+    else:
+        logger.info("未配置 AI 密钥，本次不生成 AI 说明（沿用原文）")
 
     return sections
 
@@ -332,6 +363,8 @@ def main() -> int:
     )
     parser.add_argument("--preview", action="store_true",
                         help="只生成预览文件，不发送邮件")
+    parser.add_argument("--no-search", action="store_true",
+                        help="不按标题反查原文（加快速度，但会有更多条被剔除）")
     parser.add_argument("--test", action="store_true",
                         help="测试配置与抓取（不发邮件）")
     parser.add_argument("--daemon", action="store_true",
@@ -343,6 +376,8 @@ def main() -> int:
     # 预览 / 测试模式不需要邮箱配置，可先看效果再填邮箱
     preview_only = args.preview or args.test
     config = load_config(Path(args.config), require_email=not preview_only)
+    if args.no_search:
+        config.setdefault("detail", {})["retry_search"] = False
 
     if args.daemon:
         run_daemon(config)
