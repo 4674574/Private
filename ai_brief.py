@@ -58,6 +58,9 @@ class AIConfig:
         self.model = (os.environ.get("AI_MODEL") or
                       DEFAULT_MODELS.get(provider, "deepseek-chat"))
         self.timeout = int(os.environ.get("AI_TIMEOUT") or 60)
+        # 是否关闭思考模式（省钱关键）。默认关闭思考。
+        self.disable_thinking = (os.environ.get("AI_THINKING") or "").strip().lower() \
+            not in ("1", "true", "on", "yes")
 
     @property
     def enabled(self) -> bool:
@@ -108,6 +111,10 @@ def _call_api(cfg: AIConfig, messages: List[Dict[str, str]],
         "max_tokens": 800,
         "stream": False,
     }
+    # DeepSeek 新模型默认开「思考模式」，会先生成一大段推理再给答案，
+    # 推理部分同样按输出计费，成本会翻好几倍。这里明确关掉。
+    if cfg.disable_thinking:
+        payload["thinking"] = {"type": "disabled"}
     headers = {
         "Authorization": f"Bearer {cfg.api_key}",
         "Content-Type": "application/json",
