@@ -54,6 +54,23 @@ def _esc(text: str) -> str:
     return html.escape(str(text or ""), quote=True)
 
 
+def _one_line(item: Dict[str, str], section_key: str = "") -> str:
+    """速览用的一句话：AI 生成优先，其次内置要点库，最后用标题兜底。"""
+    dg = (item.get("ai_one_line") or "").strip()
+    if dg:
+        return dg
+    dg = find_digest(item.get("title", ""), section_key)
+    if dg and dg != item.get("title"):
+        return dg
+    return brief_title(item.get("title", ""))
+
+
+def _has_content(item: Dict[str, str]) -> bool:
+    """这条新闻有没有值得展示的内容（AI 说明或原文）。"""
+    return bool((item.get("ai_explain") or "").strip()
+                or (item.get("body") or "").strip())
+
+
 def find_detail(title: str) -> dict:
     """按关键词匹配详解，命中多条时取关键词最长者。"""
     best, best_len = None, -1
@@ -75,7 +92,9 @@ def _render_card(idx: int, item: Dict[str, str], color: str,
     time_text = _esc(item.get("time", ""))
 
     d = find_detail(item.get("title", ""))
-    digest = find_digest(item.get("title", ""), section_key)
+    # 优先用 AI 生成的一句话；没有才回落到内置要点库
+    digest = (item.get("ai_one_line") or "").strip() \
+        or find_digest(item.get("title", ""), section_key)
 
     # 序号徽章
     if idx <= 3:
@@ -83,9 +102,34 @@ def _render_card(idx: int, item: Dict[str, str], color: str,
     else:
         badge_bg, badge_color = "#ECEFF1", "#607D8B"
 
-    # 正文区：优先用抓来的新闻原文；抓不到就说明情况
+    # 正文区：优先用 AI 写的完整说明；其次用抓来的新闻原文；都没有才说明情况
+    ai_explain = (item.get("ai_explain") or "").strip()
     body = (item.get("body") or "").strip()
-    if body:
+
+    if ai_explain:
+        # AI 说明用 || 分段
+        parts = [p.strip() for p in ai_explain.split("||") if p.strip()]
+        if len(parts) == 1:
+            parts = [p.strip() for p in ai_explain.split("\n") if p.strip()]
+        paras = "".join(
+            f'<p style="margin:0 0 10px 0;font-size:13.5px;line-height:1.85;color:#2b3140;'
+            f"font-family:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif;\">"
+            f"{_esc(p)}</p>"
+            for p in parts
+        )
+        blocks_html = (
+            '<div style="margin-bottom:11px;font-size:11px;font-weight:700;'
+            'color:#8b93a5;letter-spacing:.5px;">📖 新闻说明</div>' + paras
+        )
+        if body:
+            blocks_html += (
+                '<div style="margin-top:14px;padding-top:12px;border-top:1px dashed #E3E9F0;'
+                'font-size:12.5px;line-height:1.8;color:#8b93a5;">'
+                f'原文出处：{_esc(source)}　'
+                f'<a href="{url}" target="_blank" style="color:#3949AB;text-decoration:none;">'
+                '阅读完整报道 →</a></div>'
+            )
+    elif body:
         paras = "".join(
             f'<p style="margin:0 0 10px 0;font-size:13.5px;line-height:1.85;color:#2b3140;'
             f"font-family:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif;\">"
@@ -100,12 +144,9 @@ def _render_card(idx: int, item: Dict[str, str], color: str,
     else:
         blocks_html = (
             '<div style="margin-bottom:11px;font-size:11px;font-weight:700;'
-            'color:#8b93a5;letter-spacing:.5px;">📄 新闻原文</div>'
+            'color:#8b93a5;letter-spacing:.5px;">📖 新闻说明</div>'
             f'<p style="margin:0 0 8px 0;font-size:13.5px;line-height:1.85;color:#2b3140;">'
             f'{_esc(d["what"])}</p>'
-            '<p style="margin:0;font-size:12.5px;line-height:1.7;color:#8b93a5;">'
-            f'（该条来自{_esc(source)}的聚合链接，未能直接取到正文，'
-            '可点击上方标题查看完整报道）</p>'
         )
 
     # 生词行
@@ -257,6 +298,9 @@ def build_email_html(
 
     # 去掉空板块，避免出现空壳标题
     picked = {k: v for k, v in picked.items() if v}
+    # 没有内容（既没 AI 说明也没原文）的条目一律不报
+    picked = {k: [it for it in v if _has_content(it)] for k, v in picked.items()}
+    picked = {k: v for k, v in picked.items() if v}
 
     total = sum(len(v) for v in picked.values())
 
@@ -268,7 +312,7 @@ def build_email_html(
     brief_rows = []
     for key, items in picked.items():
         for item in items:
-            dg = find_digest(item.get("title", ""), key)
+            dg = _one_line(item, key)
             bt = brief_title(item.get("title", ""))
             brief_rows.append(f'''
                     <tr>
@@ -318,7 +362,7 @@ def build_email_html(
               <tr>
                 <td style="background:rgba(255,255,255,0.16);border-radius:20px;
                            padding:6px 15px;font-size:12.5px;color:#FFFFFF;font-weight:600;">
-                  今日 {total} 条 · 要点速览 + 新闻原文
+                  今日 {total} 条 · 一句话速览 + 完整说明
                 </td>
               </tr>
             </table>
@@ -384,29 +428,41 @@ def build_email_text(
         for item in items[:SECTION_QUOTA.get(key, 5)]:
             n += 1
             bt = brief_title(item.get("title", ""))
-            dg = find_digest(item.get("title", ""), key)
+            dg = _one_line(item, key)
             lines.append(f"{n}. {bt}")
             lines.append(f"   {dg}")
     lines.append("")
 
     for key, items in sections.items():
         name, sub, _color, icon = SECTION_STYLE.get(key, SECTION_STYLE["default"])
-        items = items[:SECTION_QUOTA.get(key, 5)]
+        items = [it for it in items[:SECTION_QUOTA.get(key, 5)] if _has_content(it)]
+        if not items:
+            continue
         lines.append(f"{icon} {name}（{sub}）")
         lines.append("-" * 56)
         for idx, item in enumerate(items, 1):
             d = find_detail(item.get("title", ""))
             lines.append(f"{idx}. {item.get('title', '')}")
-            lines.append(f"   要点：{find_digest(item.get('title', ''), key)}")
-            lines.append(f"   链接：{item.get('url', '')}")
+
+            ai_explain = (item.get("ai_explain") or "").strip()
             body = (item.get("body") or "").strip()
-            if body:
+
+            if ai_explain:
+                lines.append("   【新闻说明】")
+                for p in ai_explain.replace("\n", "||").split("||"):
+                    if p.strip():
+                        lines.append(f"     {p.strip()}")
+                if body:
+                    lines.append(f"   原文出处：{item.get('source', '')}")
+            elif body:
                 lines.append("   【新闻原文】")
                 for p in body.split("\n"):
                     if p.strip():
                         lines.append(f"     {p}")
             else:
-                lines.append(f"   【新闻原文】{d['what']}")
+                lines.append(f"   【新闻说明】{d['what']}")
+
+            lines.append(f"   链接：{item.get('url', '')}")
             lines.append("")
         lines.append("")
 
