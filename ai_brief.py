@@ -1,4 +1,3 @@
-ai_brief.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """AI 新闻简报生成 —— 把新闻原文交给大模型，写成一段完整说明
