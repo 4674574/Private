@@ -70,6 +70,8 @@ NOISE_PATTERNS = [
     r"^关注.*公众号$",
     r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$",
     r"^来源：\S+$",
+    r"^发布于$", r"^问AI$", r"^关注$", r"^收藏$", r"^分享$",
+    r"^\S{2,6}官方账号$", r"^\S{2,8}(报|日报|晚报|新闻|网|社)$",
 ]
 
 
@@ -99,6 +101,69 @@ def _save_cache(cache: Dict[str, str]) -> None:
 # ============================================================
 #  清洗
 # ============================================================
+# 搜索建议词/分页导航的特征串
+TAIL_NOISE_PATTERNS = [
+    r"下一页", r"上一页", r"^\d+\s*$", r"清风剑", r"^#.*#",
+    r"^\d+月\d+日[，,]?\s*连打", r"^一日两通报",
+]
+
+
+# 零宽字符：百度资讯卡片拿它当段落分隔符
+ZW_MARKS = ("\u200b", "\u200c", "\u200d", "\ufeff")
+
+
+def _first_zw(text: str) -> int:
+    """返回第一个零宽字符的位置，没有则返回 -1。"""
+    for mark in ZW_MARKS:
+        p = text.find(mark)
+        if p >= 0:
+            return p
+    return -1
+
+
+def _trim_tail_noise(text: str) -> str:
+    """
+    砍掉正文末尾的搜索建议词。
+
+    例：「…移送检察机关。」后面跟着
+        「‌‌ 1 一日两通报! 中纪委连打 两“虎” 中纪委连打三“虎”… 下一页」
+    这些不是新闻内容，留着会污染后面交给 AI 的材料。
+    """
+    if not text:
+        return text
+
+    # 找第一条明显是建议词的行，从那里整段砍掉
+    lines = text.split("\n")
+    cut_at = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if len(s) < 4:
+            continue
+        # 建议词行的普遍特征：短、含省略号或「_网」、或命中特征串
+        # 只有「整行都像建议词」才整行砍；正文里出现省略号不算
+        if len(s) < 160 and (s.count("...") or s.count("…") or "_网" in s):
+            if len(lines) > 1:      # 多行时才按行砍，单行交给下面的零宽字符逻辑
+                cut_at = i
+                break
+        if any(re.search(p, s) for p in TAIL_NOISE_PATTERNS):
+            if len(lines) > 1:
+                cut_at = i
+                break
+
+    kept = "\n".join(lines[:cut_at]).strip()
+
+    # 百度资讯卡片用零宽字符分隔「正文 / 相关搜索」，第一个零宽字符之后全是垃圾
+    pos = _first_zw(kept)
+    if pos > 0:
+        kept = kept[:pos]
+    tail = kept.find("下一页")
+    if tail > 0 and tail > len(kept) * 0.5:
+        kept = kept[:tail]
+    kept = kept.rstrip(" \u3000,，.。、")
+
+    return kept or text
+
+
 def _clean_text(raw: str) -> str:
     """把粗糙的正文清洗成干净段落，并截断长度。"""
     if not raw:
@@ -126,6 +191,9 @@ def _clean_text(raw: str) -> str:
         lines.append(s)
 
     body = "\n".join(lines).strip()
+
+    # 截掉搜索建议词尾巴：百度热搜页正文后面常跟一串相关搜索
+    body = _trim_tail_noise(body)
 
     if len(body) > MAX_CHARS:
         # 尽量在句号处截断，读起来完整
@@ -228,6 +296,50 @@ def _from_generic(html: str) -> str:
     return ""
 
 
+SEARCH_URL_PATTERNS = (
+    r"baidu\.com/s\?", r"sogou\.com/web", r"bing\.com/search",
+    r"so\.com/s\?", r"google\.com/search", r"search\.yahoo",
+    r"s\.weibo\.com", r"toutiao\.com/search",
+)
+
+
+def _is_search_page(url: str) -> bool:
+    """
+    判断链接是否为搜索引擎结果页。
+
+    例外：百度热搜榜的 m.baidu.com/s?...&sa=fyb_news 虽然长得像搜索页，
+    但它是百度自己排好版的资讯卡片页，里面是正常的新闻正文，要放行。
+    """
+    low = (url or "").lower()
+    if "sa=fyb_news" in low or "sa=re_dqa" in low:
+        return False
+    return any(re.search(pat, low) for pat in SEARCH_URL_PATTERNS)
+
+
+def _looks_like_garbage(text: str) -> bool:
+    """
+    粗筛「不像新闻正文」的文本。
+
+    典型垃圾：搜索建议词列表（大量引号、省略号、重复短句）、导航文字。
+    """
+    if not text:
+        return True
+    # 省略号/站名后缀堆砌：典型搜索建议词列表
+    if (text.count("...") + text.count("…") + text.count("_网")) > 4:
+        return True
+    # 全篇没有几个句号，却塞满引号和冒号 —— 搜索建议词的特征
+    stops = text.count("。") + text.count("！") + text.count("？")
+    if stops <= 2:
+        marks = text.count("“") + text.count("”") + text.count(":") + text.count("：")
+        if marks >= 6:
+            return True
+    # 碎句过多：按句号/感叹号切分后，平均每句不到 12 字，说明是词条罗列
+    chunks = [c for c in re.split(r"[。！？!?\n]", text) if c.strip()]
+    if len(chunks) >= 6 and sum(len(c) for c in chunks) / len(chunks) < 12:
+        return True
+    return False
+
+
 def fetch_body(url: str, source_key: str = "", timeout: int = 12,
                use_cache: bool = True) -> str:
     """
@@ -236,6 +348,10 @@ def fetch_body(url: str, source_key: str = "", timeout: int = 12,
     返回清洗后的正文（可能为空字符串——表示没抓到，调用方需降级处理）。
     """
     if not url or requests is None:
+        return ""
+
+    # 搜索引擎结果页不是新闻正文，直接放弃（交给标题反查）
+    if _is_search_page(url):
         return ""
 
     cache = _load_cache() if use_cache else {}
@@ -273,7 +389,7 @@ def fetch_body(url: str, source_key: str = "", timeout: int = 12,
                 break
 
     body = _clean_text(raw)
-    if len(body) < MIN_CHARS:
+    if len(body) < MIN_CHARS or _looks_like_garbage(body):
         body = ""
 
     if use_cache and body:
@@ -284,8 +400,13 @@ def fetch_body(url: str, source_key: str = "", timeout: int = 12,
 
 
 def fetch_bodies(items, source_key: str = "", timeout: int = 12,
-                 use_cache: bool = True) -> int:
-    """给一批新闻项就地补上 body 字段。返回成功条数。"""
+                 use_cache: bool = True, retry_search: bool = True) -> int:
+    """
+    给一批新闻项就地补上 body 字段。返回成功条数。
+
+    retry_search=True 时，直接抓失败的条目会按标题去搜索引擎反查一篇报道再抓，
+    这样百度热搜这种「链接本身是搜索页」的条目也能拿到正文。
+    """
     ok = 0
     for it in items:
         try:
@@ -293,6 +414,21 @@ def fetch_bodies(items, source_key: str = "", timeout: int = 12,
         except Exception as exc:  # noqa: BLE001
             logger.debug("fetch_body 异常: %s", exc)
             body = ""
+
+        # 直接抓失败 → 按标题反查一篇可读报道
+        if not body and retry_search:
+            try:
+                from news_search import find_article
+                new_url = find_article(it.get("title", ""), timeout)
+                if new_url:
+                    body = fetch_body(new_url, "", timeout, use_cache)
+                    if body:
+                        it["found_url"] = new_url
+                        logger.debug("反查成功: %s -> %s",
+                                     it.get("title", "")[:16], new_url[:50])
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("反查异常: %s", exc)
+
         it["body"] = body
         if body:
             ok += 1
